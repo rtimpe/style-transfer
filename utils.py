@@ -32,7 +32,7 @@ def make_encoder(input_ph, sess):
     saver.restore(sess, 'vgg_19.ckpt')
     return vgg
 
-def make_dataset(data_dir):
+def make_dataset(data_dir, include_filenames=False):
     filenames = [os.path.join(data_dir, d) for d in os.listdir(data_dir)]
     filenames = tf.constant(filenames)
     def _parse_function(filename):
@@ -40,22 +40,34 @@ def make_dataset(data_dir):
         image_decoded = tf.image.decode_jpeg(image, channels=3)
         image_resized = tf.image.resize_images(image_decoded, [224, 224],
                                                method=tf.image.ResizeMethod.BILINEAR)
+        if include_filenames:
+            return image_resized, filename
         return image_resized
 
     dataset = tf.data.Dataset.from_tensor_slices(filenames)
     dataset = dataset.map(_parse_function)
     return dataset
 
-def make_dataset_from_tfrecord(filenames, shape):
-    dataset = tf.data.TFRecordDataset(filenames)
-    def _parse_function(example):
-        features = {
-            'encoded': tf.FixedLenFeature((np.prod(shape)), tf.float32)
-        }
-        parsed_features = tf.parse_single_example(example, features)
-        encoded = tf.reshape(parsed_features['encoded'], shape)
-        return encoded
+def load_wrapper(filename):
+    return np.load(filename.decode('utf-8'))
 
+def make_precomputed_dataset(data_dir, features_name):
+    image_filenames = [os.path.join(data_dir, d) for d in os.listdir(data_dir)]
+    image_filenames = tf.constant(image_filenames)
+    features_dir = os.path.join(data_dir, features_name)
+    features_filenames = [os.path.join(features_dir, os.path.splitext(img_name)[0]) + '.npy'
+                          for img_name in os.listdir(data_dir)]
+    features_filenames = tf.constant(features_filenames)
+    def _parse_function(image_filename, features_filename):
+        features = tf.py_func(load_wrapper, [features_filename], tf.float32)
+
+        image = tf.read_file(image_filename)
+        image_decoded = tf.image.decode_jpeg(image, channels=3)
+        image_resized = tf.image.resize_images(image_decoded, [224, 224],
+                                               method=tf.image.ResizeMethod.BILINEAR)
+        return (image_resized, features)
+
+    dataset = tf.data.Dataset.from_tensor_slices((image_filenames, features_filenames))
     dataset = dataset.map(_parse_function)
     return dataset
 
@@ -65,14 +77,13 @@ def _float_feature(value):
 def _int64_feature(value):
     return tf.train.Feature(int64_list=tf.train.Int64List(value=value))
 
-
 def compute_features(data_dir, out_file_name, batch_size=32, out_layer_name='vgg_19/conv5/conv5_1', num_images=1000):
     with tf.Graph().as_default():
         with tf.Session() as sess:
             input_ph = tf.placeholder('float', (None, 224, 224, 3))
             _, layers = make_encoder(input_ph, sess)
             out_layer = layers[out_layer_name]
-            dataset = make_dataset(data_dir)
+            dataset = make_dataset(data_dir, include_filenames=True)
             if num_images is not None:
                 dataset = dataset.take(num_images)
             dataset = dataset.batch(batch_size)
@@ -82,18 +93,15 @@ def compute_features(data_dir, out_file_name, batch_size=32, out_layer_name='vgg
             with tf.python_io.TFRecordWriter(out_file_name) as writer:
                 while True:
                     try:
-                        batch = sess.run(next_batch)
+                        batch, filenames = sess.run(next_batch)
                         features_batch = sess.run(out_layer, feed_dict={input_ph: batch})
 
-                        for features in features_batch:
-                            example = tf.train.Example(
-                                features=tf.train.Features(
-                                    feature={
-                                        'encoded': _float_feature(np.reshape(features, [-1])),
-                                        'shape': _int64_feature(features.shape)
-                                    }))
-                            writer.write(example.SerializeToString())
-
+                        for (features, filename) in zip(features_batch, filenames):
+                            filename = os.path.basename(str(filename))
+                            filename = os.path.splitext(filename)[0]
+                            path = os.path.join(data_dir, out_layer_name.split('/')[1])
+                            os.makedirs(path, exist_ok=True)
+                            np.save(os.path.join(path, filename), features)
                     except tf.errors.OutOfRangeError:
                         break
 
@@ -155,4 +163,51 @@ def train(loss_fn, dataset, input_ph, sess, lr=1e-4, batch_size=16, num_epochs=5
         (summary, loss) = sess.run([merged, loss_fn], feed_dict={input_ph: batch})
         writer.add_summary(summary, i)
         print('loss at epoch', i, ':', loss)
+
+
+# unused functions that might come in handy later
+def compute_features_tfrecord(data_dir, out_file_name, batch_size=32,
+                              out_layer_name='vgg_19/conv5/conv5_1', num_images=1000):
+    with tf.Graph().as_default():
+        with tf.Session() as sess:
+            input_ph = tf.placeholder('float', (None, 224, 224, 3))
+            _, layers = make_encoder(input_ph, sess)
+            out_layer = layers[out_layer_name]
+            dataset = make_dataset(data_dir)
+            if num_images is not None:
+                dataset = dataset.take(num_images)
+            dataset = dataset.batch(batch_size)
+
+            iterator = dataset.make_one_shot_iterator()
+            next_batch = iterator.get_next()
+            with tf.python_io.TFRecordWriter(out_file_name) as writer:
+                while True:
+                    try:
+                        batch = sess.run(next_batch)
+                        features_batch = sess.run(out_layer, feed_dict={input_ph: batch})
+
+                        for features in features_batch:
+                            example = tf.train.Example(
+                                features=tf.train.Features(
+                                    feature={
+                                        'encoded': _float_feature(np.reshape(features, [-1])),
+                                        'shape': _int64_feature(features.shape)
+                                    }))
+                            writer.write(example.SerializeToString())
+
+                    except tf.errors.OutOfRangeError:
+                        break
+
+def make_dataset_from_tfrecord(filenames, shape):
+    dataset = tf.data.TFRecordDataset(filenames)
+    def _parse_function(example):
+        features = {
+            'encoded': tf.FixedLenFeature((np.prod(shape)), tf.float32)
+        }
+        parsed_features = tf.parse_single_example(example, features)
+        encoded = tf.reshape(parsed_features['encoded'], shape)
+        return encoded
+
+    dataset = dataset.map(_parse_function)
+    return dataset
 

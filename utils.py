@@ -77,7 +77,7 @@ def _float_feature(value):
 def _int64_feature(value):
     return tf.train.Feature(int64_list=tf.train.Int64List(value=value))
 
-def compute_features(data_dir, out_file_name, batch_size=32, out_layer_name='vgg_19/conv5/conv5_1', num_images=1000):
+def compute_features(data_dir, batch_size=32, out_layer_name='vgg_19/conv5/conv5_1', num_images=1000):
     with tf.Graph().as_default():
         with tf.Session() as sess:
             input_ph = tf.placeholder('float', (None, 224, 224, 3))
@@ -90,20 +90,19 @@ def compute_features(data_dir, out_file_name, batch_size=32, out_layer_name='vgg
 
             iterator = dataset.make_one_shot_iterator()
             next_batch = iterator.get_next()
-            with tf.python_io.TFRecordWriter(out_file_name) as writer:
-                while True:
-                    try:
-                        batch, filenames = sess.run(next_batch)
-                        features_batch = sess.run(out_layer, feed_dict={input_ph: batch})
+            while True:
+                try:
+                    batch, filenames = sess.run(next_batch)
+                    features_batch = sess.run(out_layer, feed_dict={input_ph: batch})
 
-                        for (features, filename) in zip(features_batch, filenames):
-                            filename = os.path.basename(str(filename))
-                            filename = os.path.splitext(filename)[0]
-                            path = os.path.join(data_dir, out_layer_name.split('/')[1])
-                            os.makedirs(path, exist_ok=True)
-                            np.save(os.path.join(path, filename), features)
-                    except tf.errors.OutOfRangeError:
-                        break
+                    for (features, filename) in zip(features_batch, filenames):
+                        filename = os.path.basename(str(filename))
+                        filename = os.path.splitext(filename)[0]
+                        path = os.path.join(data_dir, out_layer_name.split('/')[1])
+                        os.makedirs(path, exist_ok=True)
+                        np.save(os.path.join(path, filename), features)
+                except tf.errors.OutOfRangeError:
+                    break
 
 def conv_layer(i, in_size, num_filters, filter_size, input_layer):
     with tf.variable_scope('conv_layer_' + str(i)):

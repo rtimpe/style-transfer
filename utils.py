@@ -28,7 +28,8 @@ def make_decoder(inputs, layers, sess):
 
 def make_encoder(input_ph, sess):
     vgg = nets.vgg.vgg_19(input_ph)
-    saver = tf.train.Saver()
+    restore_vars = tf.get_collection(tf.GraphKeys.TRAINABLE_VARIABLES, 'vgg_19')
+    saver = tf.train.Saver(var_list=restore_vars)
     saver.restore(sess, 'vgg_19.ckpt')
     return vgg
 
@@ -51,7 +52,7 @@ def make_dataset(data_dir, include_filenames=False):
 def load_wrapper(filename):
     return np.load(filename.decode('utf-8'))
 
-def make_precomputed_dataset(data_dir, features_name):
+def make_precomputed_dataset(data_dir, features_name, num_images=1000):
     image_filenames = [os.path.join(data_dir, d) for d in os.listdir(data_dir)]
     image_filenames = tf.constant(image_filenames)
     features_dir = os.path.join(data_dir, features_name)
@@ -68,6 +69,8 @@ def make_precomputed_dataset(data_dir, features_name):
         return (image_resized, features)
 
     dataset = tf.data.Dataset.from_tensor_slices((image_filenames, features_filenames))
+    if num_images is not None:
+        dataset = dataset.take(num_images)
     dataset = dataset.map(_parse_function)
     return dataset
 
@@ -119,9 +122,14 @@ def conv_layer(i, in_size, num_filters, filter_size, input_layer):
 
     return [filters, b], conv_out
 
-def create_loss(input_ph, reconstructed_image):
-    img_loss = tf.reduce_mean(tf.square(input_ph - reconstructed_image))
-    reconstruction_loss
+def create_loss(images_ph, features_ph, reconstructed_image, layer_name, sess, lambduh=1):
+    img_loss = tf.reduce_mean(tf.square(images_ph - reconstructed_image))
+    _, d = make_encoder(reconstructed_image, sess)
+    encoded = d[layer_name]
+
+    reconstruction_loss = tf.reduce_mean(tf.square(encoded - features_ph))
+    loss = img_loss + lambduh * reconstruction_loss
+    return loss
 
 # https://stackoverflow.com/questions/35164529/in-tensorflow-is-there-any-way-to-just-initialize-uninitialised-variables#35618160
 def initialize_uninitialized(sess):
@@ -133,7 +141,7 @@ def initialize_uninitialized(sess):
     if len(not_initialized_vars):
         sess.run(tf.variables_initializer(not_initialized_vars))
 
-def train(loss_fn, dataset, input_ph, sess, lr=1e-4, batch_size=16, num_epochs=5):
+def train(loss_fn, dataset, images_ph, features_ph, sess, lr=1e-4, batch_size=16, num_epochs=5):
     trainable_vars = tf.get_collection(tf.GraphKeys.TRAINABLE_VARIABLES, 'decoder')
     print(trainable_vars)
     train_step = tf.train.AdamOptimizer(lr).minimize(loss_fn, var_list=trainable_vars)
@@ -146,7 +154,7 @@ def train(loss_fn, dataset, input_ph, sess, lr=1e-4, batch_size=16, num_epochs=5
     initialize_uninitialized(sess)
 
 
-    dataset = dataset.batch(32)
+    dataset = dataset.batch(batch_size)
     dataset = dataset.prefetch(50)
 
     for i in range(num_epochs):
@@ -154,12 +162,12 @@ def train(loss_fn, dataset, input_ph, sess, lr=1e-4, batch_size=16, num_epochs=5
         next_batch = iterator.get_next()
         while True:
             try:
-                batch = sess.run(next_batch)
-                sess.run(train_step, feed_dict={input_ph: batch})
+                images, features = sess.run(next_batch)
+                sess.run(train_step, feed_dict={features_ph: features, images_ph: images})
 
             except tf.errors.OutOfRangeError:
                 break
-        (summary, loss) = sess.run([merged, loss_fn], feed_dict={input_ph: batch})
+        (summary, loss) = sess.run([merged, loss_fn], {features_ph: features, images_ph: images})
         writer.add_summary(summary, i)
         print('loss at epoch', i, ':', loss)
 

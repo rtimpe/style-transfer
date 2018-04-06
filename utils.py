@@ -26,6 +26,36 @@ def make_decoder(inputs, layers, sess):
 
     return prev_layer
 
+# https://stackoverflow.com/questions/6574782/how-to-whiten-matrix-in-pca#11336203
+def whiten(X, fudge=1E-18):
+
+    # get the covariance matrix
+    Xcov = np.dot(X, X.T)
+
+    # eigenvalue decomposition of the covariance matrix
+    d, V = np.linalg.eigh(Xcov)
+
+    # a fudge factor can be used so that eigenvectors associated with
+    # small eigenvalues do not get overamplified.
+    D = np.diag(1. / np.sqrt(d+fudge))
+
+    # whitening matrix
+    W = np.dot(np.dot(V, D), V.T)
+
+    # multiply by the whitening matrix
+    X_white = np.dot(W, X)
+
+    return X_white, W
+
+def encode_image(image, layer_name):
+    with tf.Graph().as_default():
+        with tf.Session() as sess:
+            images_ph = tf.placeholder('float', (None, 224, 224, 3))
+            _, d = make_encoder(images_ph, sess)
+            encoded = d[layer_name]
+            encoded_img = sess.run(encoded, feed_dict={images_ph: image})
+            return encoded_img
+
 def make_encoder(input_ph, sess):
     vgg = nets.vgg.vgg_19(input_ph)
     restore_vars = tf.get_collection(tf.GraphKeys.TRAINABLE_VARIABLES, 'vgg_19')
@@ -156,6 +186,7 @@ def train(loss_fn, dataset, images_ph, features_ph, sess, lr=1e-4, batch_size=16
 
     dataset = dataset.batch(batch_size)
     dataset = dataset.prefetch(50)
+    dataset = dataset.shuffle(10000)
 
     for i in range(num_epochs):
         iterator = dataset.make_one_shot_iterator()

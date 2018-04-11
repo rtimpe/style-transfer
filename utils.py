@@ -4,7 +4,7 @@ import tensorflow as tf
 from tensorflow.contrib.slim import nets
 import numpy as np
 
-def make_decoder(inputs, layers, sess):
+def make_decoder(inputs, layers, sess, mean_img=[123.68, 116.779, 103.939]):
     all_params = []
     prev_layer = inputs
     with tf.variable_scope('decoder'):
@@ -24,7 +24,11 @@ def make_decoder(inputs, layers, sess):
         init = tf.variables_initializer(all_params)
         sess.run(init)
 
-    return prev_layer
+        mean_img = np.array(mean_img, dtype=np.float32)[np.newaxis, np.newaxis, :] # for some reason tensorflow can't do this automatically
+        mean_img = tf.tile(mean_img, (224, 224, 1))
+        postprocessed = prev_layer + mean_img
+
+    return postprocessed
 
 # https://stackoverflow.com/questions/6574782/how-to-whiten-matrix-in-pca#11336203
 def whiten(X, fudge=1E-18):
@@ -56,8 +60,11 @@ def encode_image(image, layer_name):
             encoded_img = sess.run(encoded, feed_dict={images_ph: image})
             return encoded_img
 
-def make_encoder(input_ph, sess):
-    vgg = nets.vgg.vgg_19(input_ph)
+def make_encoder(input_ph, sess, mean_img=[123.68, 116.779, 103.939]):
+    mean_img = np.array(mean_img, dtype=np.float32)[np.newaxis, np.newaxis, :] # for some reason tensorflow can't do this automatically
+    mean_img = tf.tile(mean_img, (224, 224, 1))
+    preprocessed = input_ph - mean_img
+    vgg = nets.vgg.vgg_19(preprocessed)
     restore_vars = tf.get_collection(tf.GraphKeys.TRAINABLE_VARIABLES, 'vgg_19')
     saver = tf.train.Saver(var_list=restore_vars)
     saver.restore(sess, 'vgg_19.ckpt')

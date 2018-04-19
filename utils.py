@@ -24,11 +24,11 @@ def make_decoder(inputs, layers, sess, mean_img=[123.68, 116.779, 103.939]):
         init = tf.variables_initializer(all_params)
         sess.run(init)
 
-        mean_img = np.array(mean_img, dtype=np.float32)[np.newaxis, np.newaxis, :] # for some reason tensorflow can't do this automatically
-        mean_img = tf.tile(mean_img, (224, 224, 1))
-        postprocessed = prev_layer + mean_img
+        # mean_img = np.array(mean_img, dtype=np.float32)[np.newaxis, np.newaxis, :] # for some reason tensorflow can't do this automatically
+        # mean_img = tf.tile(mean_img, (224, 224, 1))
+        # postprocessed = prev_layer + mean_img
 
-    return postprocessed
+    return prev_layer
 
 # https://stackoverflow.com/questions/6574782/how-to-whiten-matrix-in-pca#11336203
 def whiten(X, fudge=1E-18):
@@ -64,6 +64,7 @@ def make_encoder(input_ph, sess, mean_img=[123.68, 116.779, 103.939]):
     mean_img = np.array(mean_img, dtype=np.float32)[np.newaxis, np.newaxis, :] # for some reason tensorflow can't do this automatically
     mean_img = tf.tile(mean_img, (224, 224, 1))
     preprocessed = input_ph - mean_img
+    # preprocessed = tf.Print(preprocessed, [preprocessed], summarize=10)
     vgg = nets.vgg.vgg_19(preprocessed)
     restore_vars = tf.get_collection(tf.GraphKeys.TRAINABLE_VARIABLES, 'vgg_19')
     saver = tf.train.Saver(var_list=restore_vars)
@@ -153,8 +154,10 @@ def conv_layer(i, in_size, num_filters, filter_size, input_layer):
         b = tf.Variable(tf.zeros([num_filters]), name='biases')
         tf.summary.histogram('biases', b)
 
-        conv_out = tf.nn.relu(tf.nn.conv2d(input_layer, filters, [1, 1, 1, 1], "SAME") + b)
+        pre_activation = tf.nn.conv2d(input_layer, filters, [1, 1, 1, 1], "SAME") + b
+        conv_out = tf.nn.relu(pre_activation)
 
+        tf.summary.histogram('pre_activations', pre_activation)
         tf.summary.histogram('activations', conv_out)
 
     return [filters, b], conv_out
@@ -162,10 +165,10 @@ def conv_layer(i, in_size, num_filters, filter_size, input_layer):
 def create_loss(images_ph, features_ph, reconstructed_image, layer_name, sess, lambduh=1):
     img_loss = tf.reduce_mean(tf.square(images_ph - reconstructed_image))
     _, d = make_encoder(reconstructed_image, sess)
-    encoded = d[layer_name]
+    # encoded = d[layer_name]
 
-    reconstruction_loss = tf.reduce_mean(tf.square(encoded - features_ph))
-    loss = img_loss + lambduh * reconstruction_loss
+    # reconstruction_loss = tf.reduce_mean(tf.square(encoded - features_ph))
+    loss = img_loss# + lambduh * reconstruction_loss
     return loss
 
 # https://stackoverflow.com/questions/35164529/in-tensorflow-is-there-any-way-to-just-initialize-uninitialised-variables#35618160
@@ -178,23 +181,33 @@ def initialize_uninitialized(sess):
     if len(not_initialized_vars):
         sess.run(tf.variables_initializer(not_initialized_vars))
 
-def train(loss_fn, dataset, images_ph, features_ph, sess, lr=1e-4, batch_size=16, num_epochs=5):
+
+def setup_training(loss_fn, dataset, sess, lr=1e-4, batch_size=64):
     trainable_vars = tf.get_collection(tf.GraphKeys.TRAINABLE_VARIABLES, 'decoder')
     print(trainable_vars)
-    train_step = tf.train.AdamOptimizer(lr).minimize(loss_fn, var_list=trainable_vars)
+    # train_step = tf.train.AdamOptimizer(lr).minimize(loss_fn, var_list=trainable_vars)
+    train_step = tf.train.GradientDescentOptimizer(lr).minimize(loss_fn, var_list=trainable_vars)
 
     merged = tf.summary.merge_all()
-    writer = tf.summary.FileWriter('summaries', sess.graph)
 
     # initialize remaining variables (should just be variables from the optimizer)
-    print(sess.run(tf.report_uninitialized_variables()))
+    # print(sess.run(tf.report_uninitialized_variables()))
     initialize_uninitialized(sess)
-
 
     dataset = dataset.batch(batch_size)
     dataset = dataset.prefetch(50)
     dataset = dataset.shuffle(10000)
 
+    return (train_step, merged, dataset)
+
+def train(loss_fn, train_step, merged, dataset, images_ph, features_ph, sess, num_epochs=5):
+    writer = tf.summary.FileWriter('summaries', sess.graph)
+
+    iterator = dataset.make_one_shot_iterator()
+    next_batch = iterator.get_next()
+    images, features = sess.run(next_batch)
+    (summary, loss) = sess.run([merged, loss_fn], {features_ph: features, images_ph: images})
+    print('initial loss:', loss)
     for i in range(num_epochs):
         iterator = dataset.make_one_shot_iterator()
         next_batch = iterator.get_next()

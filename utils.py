@@ -71,7 +71,7 @@ def make_encoder(input_ph, sess, mean_img=[123.68, 116.779, 103.939]):
     saver.restore(sess, 'vgg_19.ckpt')
     return vgg
 
-def make_dataset(data_dir, include_filenames=False):
+def make_dataset(data_dir, batch_size=64, include_filenames=False):
     filenames = [os.path.join(data_dir, d) for d in os.listdir(data_dir)]
     filenames = tf.constant(filenames)
     def _parse_function(filename):
@@ -85,12 +85,13 @@ def make_dataset(data_dir, include_filenames=False):
 
     dataset = tf.data.Dataset.from_tensor_slices(filenames)
     dataset = dataset.map(_parse_function)
+
     return dataset
 
 def load_wrapper(filename):
     return np.load(filename.decode('utf-8'))
 
-def make_precomputed_dataset(data_dir, features_name, num_images=1000):
+def make_precomputed_dataset(data_dir, features_name, batch_size=64, num_images=1000):
     image_filenames = [os.path.join(data_dir, d) for d in os.listdir(data_dir)]
     image_filenames = tf.constant(image_filenames)
     features_dir = os.path.join(data_dir, features_name)
@@ -110,6 +111,11 @@ def make_precomputed_dataset(data_dir, features_name, num_images=1000):
     if num_images is not None:
         dataset = dataset.take(num_images)
     dataset = dataset.map(_parse_function)
+
+    dataset = dataset.shuffle(50)
+    dataset = dataset.batch(batch_size)
+    dataset = dataset.prefetch(batch_size * 2)
+
     return dataset
 
 def _float_feature(value):
@@ -131,6 +137,10 @@ def compute_features(data_dir, batch_size=32, out_layer_name='vgg_19/conv5/conv5
 
             iterator = dataset.make_one_shot_iterator()
             next_batch = iterator.get_next()
+
+            path = os.path.join(data_dir, out_layer_name.split('/')[1])
+            os.makedirs(path, exist_ok=True)
+
             while True:
                 try:
                     batch, filenames = sess.run(next_batch)
@@ -139,8 +149,6 @@ def compute_features(data_dir, batch_size=32, out_layer_name='vgg_19/conv5/conv5
                     for (features, filename) in zip(features_batch, filenames):
                         filename = os.path.basename(str(filename))
                         filename = os.path.splitext(filename)[0]
-                        path = os.path.join(data_dir, out_layer_name.split('/')[1])
-                        os.makedirs(path, exist_ok=True)
                         np.save(os.path.join(path, filename), features)
                 except tf.errors.OutOfRangeError:
                     break
@@ -163,12 +171,16 @@ def conv_layer(i, in_size, num_filters, filter_size, input_layer):
     return [filters, b], conv_out
 
 def create_loss(images_ph, features_ph, reconstructed_image, layer_name, sess, lambduh=1):
-    img_loss = tf.reduce_mean(tf.square(images_ph - reconstructed_image))
+    img_diff = images_ph - reconstructed_image
+    img_loss = tf.reduce_mean(tf.square(tf.reshape(img_diff, [tf.shape(img_diff)[0], -1])), axis=1)
     _, d = make_encoder(reconstructed_image, sess)
-    # encoded = d[layer_name]
+    encoded = d[layer_name]
 
-    # reconstruction_loss = tf.reduce_mean(tf.square(encoded - features_ph))
-    loss = img_loss# + lambduh * reconstruction_loss
+    features_diff = encoded - features_ph
+    reconstruction_loss = tf.reduce_mean(tf.square(tf.reshape(features_diff, [tf.shape(features_diff)[0], -1])), axis=1)
+    loss = img_loss + lambduh * reconstruction_loss
+
+    tf.summary.scalar('loss', tf.reduce_mean(loss))
     return loss
 
 # https://stackoverflow.com/questions/35164529/in-tensorflow-is-there-any-way-to-just-initialize-uninitialised-variables#35618160
@@ -182,11 +194,11 @@ def initialize_uninitialized(sess):
         sess.run(tf.variables_initializer(not_initialized_vars))
 
 
-def setup_training(loss_fn, dataset, sess, lr=1e-4, batch_size=64):
+def setup_training(loss_fn, dataset, sess, lr=1e-4):
     trainable_vars = tf.get_collection(tf.GraphKeys.TRAINABLE_VARIABLES, 'decoder')
     print(trainable_vars)
-    # train_step = tf.train.AdamOptimizer(lr).minimize(loss_fn, var_list=trainable_vars)
-    train_step = tf.train.GradientDescentOptimizer(lr).minimize(loss_fn, var_list=trainable_vars)
+    train_step = tf.train.AdamOptimizer(lr).minimize(loss_fn, var_list=trainable_vars)
+    # train_step = tf.train.GradientDescentOptimizer(lr).minimize(loss_fn, var_list=trainable_vars)
 
     merged = tf.summary.merge_all()
 
@@ -194,34 +206,56 @@ def setup_training(loss_fn, dataset, sess, lr=1e-4, batch_size=64):
     # print(sess.run(tf.report_uninitialized_variables()))
     initialize_uninitialized(sess)
 
-    dataset = dataset.batch(batch_size)
-    dataset = dataset.prefetch(50)
-    dataset = dataset.shuffle(10000)
+    return (train_step, merged)
 
-    return (train_step, merged, dataset)
-
-def train(loss_fn, train_step, merged, dataset, images_ph, features_ph, sess, num_epochs=5):
-    writer = tf.summary.FileWriter('summaries', sess.graph)
-
+def evaluate_dataset(dataset, loss_fn, features_ph, images_ph, sess):
     iterator = dataset.make_one_shot_iterator()
     next_batch = iterator.get_next()
-    images, features = sess.run(next_batch)
-    (summary, loss) = sess.run([merged, loss_fn], {features_ph: features, images_ph: images})
-    print('initial loss:', loss)
-    for i in range(num_epochs):
-        iterator = dataset.make_one_shot_iterator()
+    total_loss = 0.0
+    total_images = 0
+    while True:
+        try:
+            images, features = sess.run(next_batch)
+            num_images = images.shape[0]
+            loss = sess.run(loss_fn, feed_dict={features_ph: features, images_ph: images})
+            total_loss += loss.sum()
+            total_images += num_images
+
+        except tf.errors.OutOfRangeError:
+            break
+    loss = total_loss / total_images
+    return loss
+
+def train(loss_fn, train_step, merged, train_dataset, val_dataset, images_ph, features_ph, sess, num_epochs=5, summary_freq=5):
+    writer = tf.summary.FileWriter('summaries', sess.graph)
+
+    # iterator = train_dataset.make_one_shot_iterator()
+    # next_batch = iterator.get_next()
+    # images, features = sess.run(next_batch)
+    # (summary, loss) = sess.run([merged, loss_fn], {features_ph: features, images_ph: images})
+    # print('initial loss:', loss)
+    iters = 0
+    loss = evaluate_dataset(val_dataset, loss_fn, features_ph, images_ph, sess)
+    print('initial validation loss', loss)
+    for epoch in range(num_epochs):
+        iterator = train_dataset.make_one_shot_iterator()
         next_batch = iterator.get_next()
         while True:
             try:
                 images, features = sess.run(next_batch)
                 sess.run(train_step, feed_dict={features_ph: features, images_ph: images})
+                if iters % summary_freq == 0:
+                    (summary, loss) = sess.run([merged, loss_fn], {features_ph: features, images_ph: images})
+                    writer.add_summary(summary, iters)
+                    loss = loss.mean()
+                    print('training loss', loss)
+
+                iters += 1
 
             except tf.errors.OutOfRangeError:
                 break
-        (summary, loss) = sess.run([merged, loss_fn], {features_ph: features, images_ph: images})
-        writer.add_summary(summary, i)
-        print('loss at epoch', i, ':', loss)
-
+        loss = evaluate_dataset(val_dataset, loss_fn, features_ph, images_ph, sess)
+        print('validation loss after epoch', epoch, 'is', loss)
 
 # unused functions that might come in handy later
 def compute_features_tfrecord(data_dir, out_file_name, batch_size=32,

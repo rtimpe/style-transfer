@@ -197,6 +197,7 @@ def initialize_uninitialized(sess):
 def setup_training(loss_fn, dataset, sess, lr=1e-4):
     trainable_vars = tf.get_collection(tf.GraphKeys.TRAINABLE_VARIABLES, 'decoder')
     print(trainable_vars)
+    loss_fn = tf.reduce_mean(loss_fn) # is this the right place to do this?
     train_step = tf.train.AdamOptimizer(lr).minimize(loss_fn, var_list=trainable_vars)
     # train_step = tf.train.GradientDescentOptimizer(lr).minimize(loss_fn, var_list=trainable_vars)
 

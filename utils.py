@@ -3,9 +3,12 @@ import os
 import tensorflow as tf
 from tensorflow.contrib.slim import nets
 import numpy as np
+from imageio import imread
+import skimage.transform
 
-def make_decoder(inputs, layers, sess, mean_img=[123.68, 116.779, 103.939]):
+def make_decoder(inputs, layers, sess):
     all_params = []
+    all_regularized = []
     prev_layer = inputs
     with tf.variable_scope('decoder'):
         for (i, layer) in enumerate(layers):
@@ -16,19 +19,16 @@ def make_decoder(inputs, layers, sess, mean_img=[123.68, 116.779, 103.939]):
                 prev_layer = out
             else:
                 (filter_size, num_filters) = layer
-                (params, conv_out) = conv_layer(i, prev_layer.shape[3],
-                                                num_filters, filter_size, prev_layer)
+                (params, conv_out, regularized) = conv_layer(i, prev_layer.shape[3],
+                                                             num_filters, filter_size, prev_layer)
                 prev_layer = conv_out
                 all_params += params
+                all_regularized += regularized
 
         init = tf.variables_initializer(all_params)
         sess.run(init)
 
-        # mean_img = np.array(mean_img, dtype=np.float32)[np.newaxis, np.newaxis, :] # for some reason tensorflow can't do this automatically
-        # mean_img = tf.tile(mean_img, (224, 224, 1))
-        # postprocessed = prev_layer + mean_img
-
-    return prev_layer
+    return prev_layer, all_regularized
 
 # https://stackoverflow.com/questions/6574782/how-to-whiten-matrix-in-pca#11336203
 def whiten(X, fudge=1E-18):
@@ -50,6 +50,27 @@ def whiten(X, fudge=1E-18):
     X_white = np.dot(W, X)
 
     return X_white, W
+
+def color(C, S, fudge=1E-18):
+    Scov = np.dot(S, S.T)
+
+    d, V = np.linalg.eigh(Scov)
+
+    D = np.diag(np.sqrt(d+fudge))
+
+    color = np.dot(np.dot(V, D), V.T)
+
+    CS = np.dot(color, C)
+
+    return CS, color
+
+def encode_file(fname, layer):
+    img = imread(fname)
+    img = skimage.transform.resize(img, (224, 224, 3))
+    img = img[np.newaxis, :, :, :]
+    img = img * 255.0
+    encoded_img = encode_image(img, 'vgg_19/' + layer + '/' + layer + '_1')
+    return encoded_img
 
 def encode_image(image, layer_name):
     with tf.Graph().as_default():
@@ -168,9 +189,9 @@ def conv_layer(i, in_size, num_filters, filter_size, input_layer):
         tf.summary.histogram('pre_activations', pre_activation)
         tf.summary.histogram('activations', conv_out)
 
-    return [filters, b], conv_out
+    return [filters, b], conv_out, [filters]
 
-def create_loss(images_ph, features_ph, reconstructed_image, layer_name, sess, lambduh=1):
+def create_loss(images_ph, features_ph, reconstructed_image, layer_name, regularized, sess, lambda_rl=1, lambda_reg=1e-4):
     img_diff = images_ph - reconstructed_image
     img_loss = tf.reduce_mean(tf.square(tf.reshape(img_diff, [tf.shape(img_diff)[0], -1])), axis=1)
     _, d = make_encoder(reconstructed_image, sess)
@@ -178,10 +199,14 @@ def create_loss(images_ph, features_ph, reconstructed_image, layer_name, sess, l
 
     features_diff = encoded - features_ph
     reconstruction_loss = tf.reduce_mean(tf.square(tf.reshape(features_diff, [tf.shape(features_diff)[0], -1])), axis=1)
-    loss = img_loss + lambduh * reconstruction_loss
 
-    tf.summary.scalar('loss', tf.reduce_mean(loss))
-    return loss
+    per_img_loss = img_loss + lambda_rl * reconstruction_loss
+
+    regularizer = tf.add_n([tf.nn.l2_loss(r) for r in regularized])
+    total_loss = tf.reduce_sum(per_img_loss) + lambda_reg * regularizer
+
+    tf.summary.scalar('loss', total_loss)
+    return (per_img_loss, total_loss)
 
 # https://stackoverflow.com/questions/35164529/in-tensorflow-is-there-any-way-to-just-initialize-uninitialised-variables#35618160
 def initialize_uninitialized(sess):
@@ -197,7 +222,6 @@ def initialize_uninitialized(sess):
 def setup_training(loss_fn, dataset, sess, lr=1e-4):
     trainable_vars = tf.get_collection(tf.GraphKeys.TRAINABLE_VARIABLES, 'decoder')
     print(trainable_vars)
-    loss_fn = tf.reduce_mean(loss_fn) # is this the right place to do this?
     train_step = tf.train.AdamOptimizer(lr).minimize(loss_fn, var_list=trainable_vars)
     # train_step = tf.train.GradientDescentOptimizer(lr).minimize(loss_fn, var_list=trainable_vars)
 

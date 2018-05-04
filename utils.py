@@ -51,12 +51,12 @@ def whiten(X, fudge=1E-18):
 
     return X_white, W
 
-def color(C, S, fudge=1E-18):
+def color(C, S):
     Scov = np.dot(S, S.T)
 
     d, V = np.linalg.eigh(Scov)
 
-    D = np.diag(np.sqrt(d+fudge))
+    D = np.diag(np.sqrt(d))
 
     color = np.dot(np.dot(V, D), V.T)
 

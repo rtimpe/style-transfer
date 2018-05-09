@@ -34,10 +34,13 @@ def make_decoder(inputs, layers, sess):
 def whiten(X, fudge=1E-18):
 
     # get the covariance matrix
-    Xcov = np.dot(X, X.T)
+    Xcov = np.dot(X, X.T) / float(X.shape[1] - 1)
 
     # eigenvalue decomposition of the covariance matrix
     d, V = np.linalg.eigh(Xcov)
+
+    # Xcov should be psd, but numerical issues can lead to negative eigenvalues
+    d[d < 0] = 0
 
     # a fudge factor can be used so that eigenvectors associated with
     # small eigenvalues do not get overamplified.
@@ -52,17 +55,19 @@ def whiten(X, fudge=1E-18):
     return X_white, W
 
 def color(C, S):
-    Scov = np.dot(S, S.T)
+    Scov = np.dot(S, S.T) / float(S.shape[1] - 1)
 
     d, V = np.linalg.eigh(Scov)
 
+    # Scov should be psd, but numerical issues can lead to negative eigenvalues
+    d[d < 0] = 0
     D = np.diag(np.sqrt(d))
 
-    color = np.dot(np.dot(V, D), V.T)
+    cm = np.dot(np.dot(V, D), V.T)
 
-    CS = np.dot(color, C)
+    CS = np.dot(cm, C)
 
-    return CS, color
+    return CS, cm
 
 def encode_file(fname, layer):
     img = imread(fname)
